@@ -31,8 +31,10 @@ const (
 )
 
 var (
-	big1      = big.NewInt(1)
-	uncleHash = types.CalcUncleHash(nil)
+	big1       = big.NewInt(1)
+	uncleHash  = types.CalcUncleHash(nil)
+	LubanBlock = big.NewInt(29295050)
+	PlatoBlock = big.NewInt(29861024)
 )
 
 var (
