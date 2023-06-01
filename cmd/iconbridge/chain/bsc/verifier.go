@@ -20,10 +20,10 @@ import (
 )
 
 const (
-	extraVanity          = 32          // Fixed number of extra-data prefix bytes reserved for signer vanity
-	extraSeal            = 65          // Fixed number of extra-data suffix bytes reserved for signer seal
-	defaultEpochLength   = uint64(200) // Default number of blocks of checkpoint to update validatorSet from contract
-	validatorBytesLength = ethCommon.AddressLength
+	extraVanity                     = 32          // Fixed number of extra-data prefix bytes reserved for signer vanity
+	extraSeal                       = 65          // Fixed number of extra-data suffix bytes reserved for signer seal
+	defaultEpochLength              = uint64(200) // Default number of blocks of checkpoint to update validatorSet from contract
+	validatorBytesLengthBeforeLuban = ethCommon.AddressLength
 
 	ParliaGasLimitBoundDivisor uint64 = 256                // The bound divisor of the gas limit, used in update calculations.
 	MinGasLimit                uint64 = 5000               // Minimum the gas limit may ever be.
@@ -190,10 +190,10 @@ func getValidatorMapFromHex(headerExtra common.HexBytes) (map[ethCommon.Address]
 		return nil, errMissingSignature
 	}
 	addrs := headerExtra[extraVanity : len(headerExtra)-extraSeal]
-	numAddrs := len(addrs) / validatorBytesLength
+	numAddrs := len(addrs) / validatorBytesLengthBeforeLuban
 	newVals := make(map[ethCommon.Address]bool, numAddrs)
 	for i := 0; i < numAddrs; i++ {
-		newVals[ethCommon.BytesToAddress(addrs[i*validatorBytesLength:(i+1)*validatorBytesLength])] = true
+		newVals[ethCommon.BytesToAddress(addrs[i*validatorBytesLengthBeforeLuban:(i+1)*validatorBytesLengthBeforeLuban])] = true
 	}
 	return newVals, nil
 }
@@ -229,7 +229,7 @@ func (vr *Verifier) verifyHeader(header *types.Header) error {
 		return errMissingValidators
 	}
 
-	if isEpoch && signersBytes%validatorBytesLength != 0 {
+	if isEpoch && signersBytes%validatorBytesLengthBeforeLuban != 0 {
 		return errInvalidSpanValidators
 	}
 
