@@ -91,6 +91,7 @@ type BnOptions struct {
 }
 
 func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri IVerifier, err error) {
+	// TODO: Add parentHeaders
 	vr := &Verifier{
 		mu:                         sync.RWMutex{},
 		next:                       big.NewInt(int64(opts.BlockHeight)),
@@ -122,7 +123,7 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri 
 	if !bytes.Equal(header.Extra, opts.ValidatorData) {
 		return nil, fmt.Errorf("Unexpected ValidatorData(%v): Got %v Expected %v", roundedHeight, hex.EncodeToString(header.Extra), opts.ValidatorData)
 	}
-	vr.validators, err = getValidatorMapFromHex(opts.ValidatorData)
+	vr.validators, err = getValidatorMapFromHeightAndExtras(opts.BlockHeight, opts.ValidatorData)
 	if err != nil {
 		return nil, errors.Wrapf(err, "getValidatorMapFromHex %v", err)
 	}
