@@ -166,8 +166,10 @@ func (vr *Verifier) Verify(header *types.Header, nextHeader *types.Header, recei
 	if err := vr.verifyCascadingFields(nextHeader, header); err != nil {
 		return errors.Wrapf(err, "verifyCascadingFields %v", err)
 	}
-	if err := vr.verifyVoteAttestation(nextHeader, header); err != nil {
-		fmt.Println("Warn: Error verifying vote attestation") // TODO: How does logging work for verifier.., only receiver has logs?
+	// TODO: Fix as per incoming parms
+	parents := []*types.Header{header}
+	if err := vr.verifyVoteAttestation(nextHeader, parents); err != nil {
+		log.Println("Warn: Error verifying vote attestation") // TODO: How does logging work for verifier.., only receiver has logs?
 		if isPlatoBlock(header.Number) {                      // is plato block
 			return err
 		}
