@@ -10,7 +10,9 @@ import (
 	"math/big"
 	"math/rand"
 	"os"
+	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -93,8 +95,8 @@ type BnOptions struct {
 	Concurrency uint64
 }
 
-func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri IVerifier, err error) {
-	verifierOptionsSnapshot := loadBscVerifierOptionsSnapshot(opts.SnapshotFile)
+func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions, receiverStartHeight uint64) (vri IVerifier, err error) {
+	verifierOptionsSnapshot := loadBscVerifierOptionsSnapshot(opts.SnapshotDir, receiverStartHeight)
 	if verifierOptionsSnapshot != nil && verifierOptionsSnapshot.JustifiedBlockHeight > opts.JustifiedBlockHeight {
 		opts = verifierOptionsSnapshot
 	}
@@ -156,7 +158,26 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri 
 	return vr, nil
 }
 
-func loadBscVerifierOptionsSnapshot(snapshotFile string) *VerifierOptions {
+func loadBscVerifierOptionsSnapshot(snapshotDir string, receiverStartHeight uint64) *VerifierOptions {
+	files, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		return nil
+	}
+	sort.Slice(files, func(i, j int) bool {
+		fi, _ := strconv.Atoi(files[i].Name())
+		fj, _ := strconv.Atoi(files[j].Name())
+		return fi > fj
+	})
+	snapshotFile := ""
+	for _, file := range files {
+		f, _ := strconv.Atoi(file.Name())
+		if f < int(receiverStartHeight) {
+			snapshotFile = path.Join(snapshotDir, file.Name())
+		}
+	}
+	if snapshotFile == "" {
+		return nil
+	}
 	f, err := os.Open(snapshotFile)
 	if err != nil {
 		return nil
@@ -420,7 +441,7 @@ func (r *receiver) receiveLoop(ctx context.Context, opts *BnOptions, callback fu
 											BlockHeight:          bn.Header.Number.Uint64(),
 											JustifiedBlockHeight: justifiedBlockHeight,
 											ValidatorData:        roundedHeader.Extra,
-											SnapshotFile:         r.opts.Verifier.SnapshotFile,
+											SnapshotDir:          r.opts.Verifier.SnapshotDir,
 										}
 										if err := snapshotVerifierOptions(newOpts); err == nil {
 											r.opts.Verifier = newOpts
@@ -659,12 +680,36 @@ func (r *receiver) getRelayReceipts(v *types.BlockNotification) []*chain.Receipt
 }
 
 func snapshotVerifierOptions(opts *VerifierOptions) error {
-	if opts.SnapshotFile == "" {
-		return errors.New("no snapshot file specified")
+	maxSnapshots := 100
+	if opts.SnapshotDir == "" {
+		return errors.New("no snapshot dir specified")
+	}
+	if _, err := os.Stat(opts.SnapshotDir); err == os.ErrNotExist {
+		if err := os.MkdirAll(opts.SnapshotDir, 0775); err != nil {
+			return err
+		}
 	}
 	data, err := json.MarshalIndent(opts, "", "  ")
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(opts.SnapshotFile, data, 0644)
+	filename := path.Join(opts.SnapshotDir, fmt.Sprintf("%v.json", opts.BlockHeight))
+	if err := ioutil.WriteFile(filename, data, 0644); err != nil {
+		return err
+	}
+	files, err := os.ReadDir(opts.SnapshotDir)
+	if err != nil {
+		return err
+	}
+	sort.Slice(files, func(i, j int) bool {
+		fi, _ := strconv.Atoi(files[i].Name())
+		fj, _ := strconv.Atoi(files[j].Name())
+		return fi > fj
+	})
+	if len(files) > maxSnapshots {
+		for _, file := range files[maxSnapshots:] {
+			os.Remove(file.Name())
+		}
+	}
+	return nil
 }

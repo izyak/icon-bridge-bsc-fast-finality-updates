@@ -85,7 +85,7 @@ type VerifierOptions struct {
 	BlockHeight          uint64          `json:"blockHeight"`
 	JustifiedBlockHeight uint64          `json:"justifiedBlockHeight"`
 	ValidatorData        common.HexBytes `json:"validatorData"`
-	SnapshotFile         string          `json:"snapshotFile"`
+	SnapshotDir          string          `json:"snapshotDir"`
 }
 
 // next points to height whose parentHash is expected
