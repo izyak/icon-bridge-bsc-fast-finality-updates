@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"math/big"
 	"math/rand"
 	"sort"
@@ -391,6 +392,21 @@ func (r *receiver) receiveLoop(ctx context.Context, opts *BnOptions, callback fu
 									}
 								}
 								unfinalizedBlocks.Enqueue(justifiedBlock)
+
+								lastBlockHeight := lastBlock.Header.Number.Uint64()
+								if lastBlockHeight%1000 == 0 {
+
+									roundedHeight := big.NewInt(int64(lastBlockHeight - defaultEpochLength))
+
+									roundedHeader, _ := r.client().GetHeaderByHeight(ctx, roundedHeight)
+
+									VerifierOptsSnapshot(&VerifierOptions{
+										BlockHeight:          lastBlockHeight,
+										JustifiedBlockHeight: lastBlockHeight - 1,
+										ValidatorData:        roundedHeader.Extra,
+									})
+								}
+
 							}
 
 							if err := vr.Update(justifiedBlock.Header, bn.Header); err != nil {
@@ -619,4 +635,15 @@ func (r *receiver) getRelayReceipts(v *types.BlockNotification) []*chain.Receipt
 		}
 	}
 	return receipts
+}
+
+func VerifierOptsSnapshot(opts *VerifierOptions) {
+	data := map[string]interface{}{
+		"blockHeight":          opts.BlockHeight,
+		"justifiedBlockHeight": opts.JustifiedBlockHeight,
+		"validatorData":        opts.ValidatorData.String(),
+	}
+	file, _ := json.MarshalIndent(data, "", " ")
+
+	_ = ioutil.WriteFile("verifierOptsSnapshot.json", file, 0644)
 }
