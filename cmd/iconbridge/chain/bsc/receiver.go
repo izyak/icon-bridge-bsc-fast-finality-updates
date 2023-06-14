@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"math/big"
 	"math/rand"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -32,6 +34,14 @@ const (
 	MonitorBlockMaxConcurrency = 300 // number of concurrent requests to synchronize older blocks from source chain
 	RPCCallRetry               = 5
 )
+
+var (
+	bscVerifierSnapshot string
+)
+
+func init() {
+	flag.StringVar(&bscVerifierSnapshot, "verifier config", "bscVerifierSnapshot.json", "verifier Snapshot .json file")
+}
 
 func NewReceiver(
 	src, dst chain.BTPAddress, urls []string,
@@ -94,6 +104,11 @@ type BnOptions struct {
 
 func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri IVerifier, err error) {
 	// TODO: Add parentHeaders
+	snapshotVerifier := loadBscVerifierConfig(bscVerifierSnapshot)
+	if snapshotVerifier != nil {
+		opts = snapshotVerifier
+	}
+	
 	vr := &Verifier{
 		mu:                         sync.RWMutex{},
 		next:                       big.NewInt(int64(opts.BlockHeight)),
@@ -107,6 +122,7 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri 
 			},
 		),
 	}
+
 
 	// cross check input parent hash
 	header, err := r.client().GetHeaderByHeight(ctx, big.NewInt(int64(opts.BlockHeight)))
@@ -149,6 +165,19 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri 
 		return nil, errors.Wrapf(err, "getValidatorMapFromHex %v", err)
 	}
 	return vr, nil
+}
+
+func loadBscVerifierConfig(file string) *VerifierOptions {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil
+	}
+	cfg := &VerifierOptions{}
+	err = json.NewDecoder(f).Decode(cfg)
+	if err != nil {
+		return nil
+	}
+	return cfg
 }
 
 func (r *receiver) syncVerifier(ctx context.Context, vr IVerifier, height int64) error {
