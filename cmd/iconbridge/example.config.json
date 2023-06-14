@@ -23,7 +23,8 @@
                     "verifier": {
                         "blockHeight": 29294050,
                         "validatorData": "0xd883010200846765746888676f312e31392e38856c696e7578000000999eaf8b1284214b9b9c85549ab3d2b972df0deef66ac2c935552c16704d214347f29fa77f77da6d75d7c752871863a8931558337b40dd884316ad745c47943e96c5d20b2a975c050e4220be276ace4892f4b41a980a75ecd1309ea12fa2ed87a8744fbfc9b863d5b71b214cb885500844365e95cd9942c7276e7fd8f474cf03cceff28abc65c9cbae594f725c80e12d3d07ca5f85258f0940ce2d6fda9b8cd418c67111a8c4ec38cf5dd5648fe3e4171fb356aaab5138dac969c225bc4f5d0abb8ca14253e18da37d04685366f12a6601",
-                        "justifiedBlockHeight": 29294049
+                        "justifiedBlockHeight": 29294049,
+                        "snapshotFile": "/path/to/verifier_snapshot.json"
                     },
                     "syncConcurrency": 100
                 },

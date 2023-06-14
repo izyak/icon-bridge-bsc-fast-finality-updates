@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"math/big"
@@ -34,14 +33,6 @@ const (
 	MonitorBlockMaxConcurrency = 300 // number of concurrent requests to synchronize older blocks from source chain
 	RPCCallRetry               = 5
 )
-
-var (
-	bscVerifierSnapshot string
-)
-
-func init() {
-	flag.StringVar(&bscVerifierSnapshot, "verifier config", "bscVerifierSnapshot.json", "verifier Snapshot .json file")
-}
 
 func NewReceiver(
 	src, dst chain.BTPAddress, urls []string,
@@ -103,12 +94,11 @@ type BnOptions struct {
 }
 
 func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri IVerifier, err error) {
-	// TODO: Add parentHeaders
-	snapshotVerifier := loadBscVerifierConfig(bscVerifierSnapshot)
-	if snapshotVerifier != nil {
-		opts = snapshotVerifier
+	verifierOptionsSnapshot := loadBscVerifierOptionsSnapshot(opts.SnapshotFile)
+	if verifierOptionsSnapshot != nil && verifierOptionsSnapshot.JustifiedBlockHeight > opts.JustifiedBlockHeight {
+		opts = verifierOptionsSnapshot
 	}
-	
+
 	vr := &Verifier{
 		mu:                         sync.RWMutex{},
 		next:                       big.NewInt(int64(opts.BlockHeight)),
@@ -122,7 +112,6 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri 
 			},
 		),
 	}
-
 
 	// cross check input parent hash
 	header, err := r.client().GetHeaderByHeight(ctx, big.NewInt(int64(opts.BlockHeight)))
@@ -167,8 +156,8 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri 
 	return vr, nil
 }
 
-func loadBscVerifierConfig(file string) *VerifierOptions {
-	f, err := os.Open(file)
+func loadBscVerifierOptionsSnapshot(snapshotFile string) *VerifierOptions {
+	f, err := os.Open(snapshotFile)
 	if err != nil {
 		return nil
 	}
@@ -422,18 +411,21 @@ func (r *receiver) receiveLoop(ctx context.Context, opts *BnOptions, callback fu
 								}
 								unfinalizedBlocks.Enqueue(justifiedBlock)
 
-								lastBlockHeight := lastBlock.Header.Number.Uint64()
-								if lastBlockHeight%1000 == 0 {
-
-									roundedHeight := big.NewInt(int64(lastBlockHeight - defaultEpochLength))
-
-									roundedHeader, _ := r.client().GetHeaderByHeight(ctx, roundedHeight)
-
-									VerifierOptsSnapshot(&VerifierOptions{
-										BlockHeight:          lastBlockHeight,
-										JustifiedBlockHeight: lastBlockHeight - 1,
-										ValidatorData:        roundedHeader.Extra,
-									})
+								justifiedBlockHeight := justifiedBlock.Header.Number.Uint64()
+								if justifiedBlockHeight-r.opts.Verifier.BlockHeight >= 1000 {
+									roundedHeight := big.NewInt(int64(justifiedBlockHeight - justifiedBlockHeight%defaultEpochLength))
+									roundedHeader, err := r.client().GetHeaderByHeight(ctx, roundedHeight)
+									if err == nil {
+										newOpts := &VerifierOptions{
+											BlockHeight:          bn.Header.Number.Uint64(),
+											JustifiedBlockHeight: justifiedBlockHeight,
+											ValidatorData:        roundedHeader.Extra,
+											SnapshotFile:         r.opts.Verifier.SnapshotFile,
+										}
+										if err := snapshotVerifierOptions(newOpts); err == nil {
+											r.opts.Verifier = newOpts
+										}
+									}
 								}
 
 							}
@@ -666,13 +658,13 @@ func (r *receiver) getRelayReceipts(v *types.BlockNotification) []*chain.Receipt
 	return receipts
 }
 
-func VerifierOptsSnapshot(opts *VerifierOptions) {
-	data := map[string]interface{}{
-		"blockHeight":          opts.BlockHeight,
-		"justifiedBlockHeight": opts.JustifiedBlockHeight,
-		"validatorData":        opts.ValidatorData.String(),
+func snapshotVerifierOptions(opts *VerifierOptions) error {
+	if opts.SnapshotFile == "" {
+		return errors.New("no snapshot file specified")
 	}
-	file, _ := json.MarshalIndent(data, "", " ")
-
-	_ = ioutil.WriteFile("verifierOptsSnapshot.json", file, 0644)
+	data, err := json.MarshalIndent(opts, "", "  ")
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(opts.SnapshotFile, data, 0644)
 }

@@ -65,10 +65,6 @@ var (
 	// their extra-data fields.
 	errExtraValidators = errors.New("non-sprint-end block contains extra validator list")
 
-	// errInvalidSpanValidators is returned if a block contains an
-	// invalid list of validators (i.e. non divisible by 20 bytes).
-	errInvalidSpanValidators = errors.New("invalid validator list on sprint end block")
-
 	// errInvalidMixDigest is returned if a block's mix digest is non-zero.
 	errInvalidMixDigest = errors.New("non-zero mix digest")
 
@@ -89,6 +85,7 @@ type VerifierOptions struct {
 	BlockHeight          uint64          `json:"blockHeight"`
 	JustifiedBlockHeight uint64          `json:"justifiedBlockHeight"`
 	ValidatorData        common.HexBytes `json:"validatorData"`
+	SnapshotFile         string          `json:"snapshotFile"`
 }
 
 // next points to height whose parentHash is expected
@@ -162,16 +159,16 @@ func (vr *Verifier) GetBlsPublicKeysForHeight(curHeight *big.Int) (map[ethCommon
 func (vr *Verifier) Verify(lastHeader, currentHeader *ethTypes.Header, receipts ethTypes.Receipts) (error, bool) { // remove previous header
 
 	if currentHeader.Number.Cmp((&big.Int{}).Add(lastHeader.Number, big1)) != 0 {
-		return fmt.Errorf("Different height between successive header: Prev %v New %v", lastHeader.Number, currentHeader.Number), false
+		return fmt.Errorf("different height between successive header: Prev %v New %v", lastHeader.Number, currentHeader.Number), false
 	}
 	if lastHeader.Hash() != currentHeader.ParentHash {
-		return fmt.Errorf("Different hash between successive header: (%v): Prev %v New %v", lastHeader.Number, lastHeader.Hash(), currentHeader.ParentHash), false
+		return fmt.Errorf("different hash between successive header: (%v): Prev %v New %v", lastHeader.Number, lastHeader.Hash(), currentHeader.ParentHash), false
 	}
 	if vr.Next().Cmp(lastHeader.Number) != 0 {
-		return fmt.Errorf("Unexpected height: Got %v Expected %v", lastHeader.Number, vr.Next()), false
+		return fmt.Errorf("unexpected height: Got %v Expected %v", lastHeader.Number, vr.Next()), false
 	}
 	if lastHeader.ParentHash != vr.ParentHash() {
-		return fmt.Errorf("Unexpected Hash(%v): Got %v Expected %v", lastHeader.Number, lastHeader.ParentHash, vr.ParentHash()), false
+		return fmt.Errorf("unexpected Hash(%v): Got %v Expected %v", lastHeader.Number, lastHeader.ParentHash, vr.ParentHash()), false
 	}
 
 	if err := vr.verifyHeader(currentHeader); err != nil {
@@ -441,7 +438,7 @@ func (vr *Verifier) verifyVoteAttestation(header *ethTypes.Header, parent *ethTy
 
 	validators, blsPubKeys := vr.GetBlsPublicKeysForHeight(parent.Number)
 	if len(validators) != len(blsPubKeys) {
-		return fmt.Errorf("Length of validators and bls public keys not same"), false
+		return fmt.Errorf("length of validators and bls public keys not same"), false
 	}
 
 	validatorsBitSet := bitset.From([]uint64{uint64(attestation.VoteAddressSet)})
