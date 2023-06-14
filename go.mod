@@ -10,7 +10,7 @@ require (
 	github.com/bshuster-repo/logrus-logstash-hook v0.4.1
 	github.com/btcsuite/btcutil v1.0.3-0.20201208143702-a53e38424cce
 	github.com/dgraph-io/badger v1.6.2
-	github.com/ethereum/go-ethereum v1.11.3
+	github.com/ethereum/go-ethereum v1.12.0
 	github.com/evalphobia/logrus_fluent v0.5.4
 	github.com/gofrs/uuid v4.2.0+incompatible
 	github.com/gorilla/websocket v1.5.0
@@ -24,7 +24,7 @@ require (
 	github.com/mitchellh/mapstructure v1.4.1
 	github.com/near/borsh-go v0.3.1
 	github.com/pkg/errors v0.9.1
-	github.com/prysmaticlabs/prysm/v4 v4.0.5
+	github.com/prysmaticlabs/prysm/v4 v4.0.2
 	github.com/reactivex/rxgo/v2 v2.5.0
 	github.com/shopspring/decimal v1.3.1
 	github.com/sirupsen/logrus v1.9.0

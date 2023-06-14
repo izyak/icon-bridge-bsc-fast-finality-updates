@@ -20,6 +20,7 @@ import (
 	"github.com/icon-project/icon-bridge/cmd/iconbridge/chain"
 	"github.com/icon-project/icon-bridge/cmd/iconbridge/chain/bsc/types"
 	"github.com/icon-project/icon-bridge/common/log"
+	"github.com/icon-project/icon-bridge/common/queue"
 	"github.com/pkg/errors"
 )
 
@@ -95,11 +96,15 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri 
 	vr := &Verifier{
 		mu:                         sync.RWMutex{},
 		next:                       big.NewInt(int64(opts.BlockHeight)),
-		parentHash:                 common.HexToHash(opts.BlockHash.String()),
 		validators:                 map[ethCommon.Address]bool{},
 		prevValidators:             map[ethCommon.Address]bool{},
 		useNewValidatorsFromHeight: big.NewInt(int64(opts.BlockHeight)),
 		chainID:                    r.client().GetChainID(),
+		log: r.log.WithFields(
+			log.Fields{
+				log.FieldKeyPrefix: "vr_",
+			},
+		),
 	}
 
 	// cross check input parent hash
@@ -108,22 +113,37 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions) (vri 
 		err = errors.Wrapf(err, "GetHeaderByHeight: %v", err)
 		return nil, err
 	}
-	if header.ParentHash != vr.parentHash {
-		return nil, fmt.Errorf("Unexpected Hash(%v): Got %v Expected %v", opts.BlockHeight, header.ParentHash.Hex(), vr.parentHash.Hex())
+	vr.parentHash = header.ParentHash
+
+	if isLubanBlock(header.Number) {
+		justifiedHeader, err := r.client().GetHeaderByHeight(ctx, big.NewInt(int64(opts.JustifiedBlockHeight)))
+		if err != nil {
+			return nil, err
+		}
+		headerVoteAttestation, err := getVoteAttestationFromHeader(header)
+
+		if headerVoteAttestation.Data.SourceNumber != justifiedHeader.Number.Uint64() || headerVoteAttestation.Data.SourceHash != justifiedHeader.Hash() {
+			return nil, errors.Wrapf(err, "Block height %v does not have valid attestation for justified block: %v", header.Number, justifiedHeader.Number)
+		}
+		vr.latestJustifiedHeader = justifiedHeader
 	}
 
-	// cross check input validator data
 	roundedHeight := big.NewInt(int64(opts.BlockHeight - opts.BlockHeight%defaultEpochLength))
-	header, err = r.client().GetHeaderByHeight(ctx, roundedHeight)
+	// cross check input validator data
+	if opts.BlockHeight%defaultEpochLength == 0 {
+		roundedHeight = big.NewInt(int64(opts.BlockHeight - defaultEpochLength))
+	}
+	roundedHeader, err := r.client().GetHeaderByHeight(ctx, roundedHeight)
 	if err != nil {
 		err = errors.Wrapf(err, "GetHeaderByHeight: %v", err)
 		return nil, err
 	}
 
-	if !bytes.Equal(header.Extra, opts.ValidatorData) {
-		return nil, fmt.Errorf("Unexpected ValidatorData(%v): Got %v Expected %v", roundedHeight, hex.EncodeToString(header.Extra), opts.ValidatorData)
+	if !bytes.Equal(roundedHeader.Extra, opts.ValidatorData) {
+		return nil, fmt.Errorf("Unexpected ValidatorData(%v): Got %v Expected %v", roundedHeight, hex.EncodeToString(roundedHeader.Extra), opts.ValidatorData)
 	}
-	vr.validators, err = getValidatorMapFromHeightAndExtras(opts.BlockHeight, opts.ValidatorData)
+
+	vr.validators, vr.blsPubKeys, err = parseValidators(roundedHeader)
 	if err != nil {
 		return nil, errors.Wrapf(err, "getValidatorMapFromHex %v", err)
 	}
@@ -154,7 +174,10 @@ func (r *receiver) syncVerifier(ctx context.Context, vr IVerifier, height int64)
 
 	r.log.WithFields(log.Fields{"height": vr.Next().String(), "target": height}).Info("syncVerifier: start")
 
-	var prevHeader *ethTypes.Header
+	unfinalizedBlocks := queue.NewQueue(BlockFinalityConfirmations) // queue of blocks whose attestation could not be verified
+	var lastBlock *ethTypes.Header                                  // last block whose attestation was to be verified
+	var justifiedBlock *ethTypes.Header                             // latest justified block
+
 	cursor := vr.Next().Int64()
 	for cursor <= height {
 		rqch := make(chan *req, r.opts.SyncConcurrency)
@@ -214,22 +237,47 @@ func (r *receiver) syncVerifier(ctx context.Context, vr IVerifier, height int64)
 			for i := range sres {
 				cursor++
 				next := sres[i]
-				if prevHeader == nil {
-					prevHeader = next.Header
+				if lastBlock == nil {
+					lastBlock = next.Header
 					continue
 				}
 				if vr.Next().Int64() >= height { // if height is greater than targetHeight, break loop
 					break
 				}
-				err := vr.Verify(prevHeader, next.Header, nil)
+				err, lastBlockIsJustified := vr.Verify(lastBlock, next.Header, nil)
 				if err != nil {
-					return errors.Wrapf(err, "syncVerifier: Verify: %v", err)
+					r.log.WithFields(log.Fields{
+						"height":     lastBlock.Number,
+						"lbnHash":    lastBlock.Hash,
+						"nextHeight": next,
+						"bnHash":     next.Header.Hash()}).Error("verification failed. refetching block ", err)
+					cursor = int64(lastBlock.Number.Uint64()) - 1
+					lastBlock = nil
+					break
 				}
-				err = vr.Update(prevHeader)
-				if err != nil {
+
+				if !lastBlockIsJustified {
+					if err := unfinalizedBlocks.Enqueue(lastBlock); err != nil {
+						unfinalizedBlocks.Dequeue() // always dequeue if the queue is full
+						unfinalizedBlocks.Enqueue(lastBlock)
+					}
+
+				} else {
+					justifiedBlock = lastBlock
+					for unfinalizedBlocks.Len() > 0 {
+						_, err := unfinalizedBlocks.Dequeue()
+						if err != nil {
+							break
+						}
+					}
+					unfinalizedBlocks.Enqueue(justifiedBlock)
+				}
+
+				if err := vr.Update(justifiedBlock, next.Header); err != nil {
 					return errors.Wrapf(err, "syncVerifier: Update: %v", err)
 				}
-				prevHeader = next.Header
+
+				lastBlock = next.Header
 			}
 			r.log.WithFields(log.Fields{"height": vr.Next().String(), "target": height}).Debug("syncVerifier: syncing")
 		}
@@ -276,11 +324,11 @@ func (r *receiver) receiveLoop(ctx context.Context, opts *BnOptions, callback fu
 		}
 		return height - BlockFinalityConfirmations
 	}
-	next, latest := opts.StartHeight, latestHeight()
+	next, latest := opts.StartHeight, latestHeight() // TODO change next
 
-	// last unverified block notification
-	var lbn *types.BlockNotification
-	// start monitor loop
+	unfinalizedBlocks := queue.NewQueue(BlockFinalityConfirmations) // queue of blocks whose attestation could not be verified
+	var lastBlock *types.BlockNotification                          // block whose attestation was to be verified
+	var justifiedBlock *types.BlockNotification                     // latest justified block
 
 	for {
 		select {
@@ -299,40 +347,65 @@ func (r *receiver) receiveLoop(ctx context.Context, opts *BnOptions, callback fu
 		case bn := <-bnch:
 			// process all notifications
 			for ; bn != nil; next++ {
-				if lbn != nil {
-					if bn.Height.Cmp(lbn.Height) == 0 {
-						if bn.Header.ParentHash != lbn.Header.ParentHash {
-							r.log.WithFields(log.Fields{"lbnParentHash": lbn.Header.ParentHash, "bnParentHash": bn.Header.ParentHash}).Error("verification failed on retry ")
+				if lastBlock != nil {
+					if bn.Height.Cmp(lastBlock.Height) == 0 {
+						if bn.Header.ParentHash != lastBlock.Header.ParentHash {
+							r.log.WithFields(log.Fields{"lbnParentHash": lastBlock.Header.ParentHash, "bnParentHash": bn.Header.ParentHash}).Error("verification failed on retry ")
 							break
 						}
 					} else {
 						if vr != nil {
-							if err := vr.Verify(lbn.Header, bn.Header, bn.Receipts); err != nil {
+							err, lastBlockIsJustified := vr.Verify(lastBlock.Header, bn.Header, bn.Receipts)
+							if err != nil {
 								r.log.WithFields(log.Fields{
-									"height":     lbn.Height,
-									"lbnHash":    lbn.Hash,
+									"height":     lastBlock.Height,
+									"lbnHash":    lastBlock.Hash,
 									"nextHeight": next,
 									"bnHash":     bn.Hash}).Error("verification failed. refetching block ", err)
-								next--
+								next = lastBlock.Header.Number.Uint64()
+								lastBlock = nil
 								break
 							}
-							if err := vr.Update(lbn.Header); err != nil {
+
+							if !lastBlockIsJustified {
+								if err := unfinalizedBlocks.Enqueue(lastBlock); err != nil {
+									_bn, _ := unfinalizedBlocks.Dequeue()
+									bn := _bn.(*types.BlockNotification)
+									if err := callback(bn); err != nil {
+										return errors.Wrapf(err, "receiveLoop: callback: %v", err)
+									}
+									unfinalizedBlocks.Enqueue(lastBlock)
+								}
+
+							} else {
+								justifiedBlock = lastBlock
+
+								for unfinalizedBlocks.Len() > 0 {
+									lbn, err := unfinalizedBlocks.Dequeue()
+									if err != nil {
+										break
+									}
+									bn := lbn.(*types.BlockNotification)
+									if err := callback(bn); err != nil {
+										return errors.Wrapf(err, "receiveLoop: callback: %v", err)
+									}
+								}
+								unfinalizedBlocks.Enqueue(justifiedBlock)
+							}
+
+							if err := vr.Update(justifiedBlock.Header, bn.Header); err != nil {
 								return errors.Wrapf(err, "receiveLoop: vr.Update: %v", err)
 							}
 						}
-						if err := callback(lbn); err != nil {
-							return errors.Wrapf(err, "receiveLoop: callback: %v", err)
-						}
 					}
 				}
-				if lbn, bn = bn, nil; len(bnch) > 0 {
+				if lastBlock, bn = bn, nil; len(bnch) > 0 {
 					bn = <-bnch
 				}
 			}
 			// remove unprocessed notifications
 			for len(bnch) > 0 {
 				<-bnch
-				//r.log.WithFields(log.Fields{"lenBnch": len(bnch), "height": t.Height}).Info("remove unprocessed block noitification")
 			}
 
 		default:

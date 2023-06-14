@@ -16,7 +16,7 @@ import (
 	"golang.org/x/crypto/sha3"
 
 	"github.com/ethereum/go-ethereum/consensus"
-	"github.com/ethereum/go-ethereum/core/types"
+
 	ethTypes "github.com/ethereum/go-ethereum/core/types"
 	bscTypes "github.com/icon-project/icon-bridge/cmd/iconbridge/chain/bsc/types"
 	"github.com/icon-project/icon-bridge/common"
@@ -41,7 +41,7 @@ const (
 
 var (
 	big1       = big.NewInt(1)
-	uncleHash  = types.CalcUncleHash(nil)
+	uncleHash  = ethTypes.CalcUncleHash(nil)
 	LubanBlock = big.NewInt(29295050)
 	PlatoBlock = big.NewInt(29861024)
 )
@@ -86,9 +86,9 @@ var (
 )
 
 type VerifierOptions struct {
-	BlockHeight   uint64          `json:"blockHeight"`
-	BlockHash     common.HexBytes `json:"parentHash"`
-	ValidatorData common.HexBytes `json:"validatorData"`
+	BlockHeight          uint64          `json:"blockHeight"`
+	JustifiedBlockHeight uint64          `json:"justifiedBlockHeight"`
+	ValidatorData        common.HexBytes `json:"validatorData"`
 }
 
 // next points to height whose parentHash is expected
@@ -100,16 +100,20 @@ type Verifier struct {
 	parentHash                 ethCommon.Hash
 	validators                 map[ethCommon.Address]bool
 	prevValidators             map[ethCommon.Address]bool
-	blsPubKeys                 []bscTypes.BLSPublicKey
 	useNewValidatorsFromHeight *big.Int
+	latestJustifiedHeader      *ethTypes.Header
+	blsPubKeys                 []bscTypes.BLSPublicKey
+	prevBlsPubKeys             []bscTypes.BLSPublicKey
+	log                        log.Logger
 }
 
 type IVerifier interface {
 	Next() *big.Int
-	Verify(header *types.Header, nextHeader *types.Header, receipts ethTypes.Receipts) error
-	Update(header *types.Header) (err error)
+	Verify(lastHeader, currentHeader *ethTypes.Header, receipts ethTypes.Receipts) (error, bool)
+	Update(justifiedHeader, currentHeader *ethTypes.Header) (err error)
 	ParentHash() ethCommon.Hash
 	IsValidator(addr ethCommon.Address, curHeight *big.Int) bool
+	GetBlsPublicKeysForHeight(curHeight *big.Int) (map[ethCommon.Address]bool, []bscTypes.BLSPublicKey)
 }
 
 func (vr *Verifier) Next() *big.Int {
@@ -143,110 +147,86 @@ func (vr *Verifier) IsValidator(addr ethCommon.Address, curHeight *big.Int) bool
 	return exists
 }
 
-// prove that header is linked to verified nextHeader
-// only then can header be used for receiver.Callback or vr.Update()
-func (vr *Verifier) Verify(header *types.Header, nextHeader *types.Header, receipts ethTypes.Receipts) error {
+func (vr *Verifier) GetBlsPublicKeysForHeight(curHeight *big.Int) (map[ethCommon.Address]bool, []bscTypes.BLSPublicKey) {
+	vr.mu.RLock()
+	defer vr.mu.RUnlock()
 
-	if nextHeader.Number.Cmp((&big.Int{}).Add(header.Number, big1)) != 0 {
-		return fmt.Errorf("Different height between successive header: Prev %v New %v", header.Number, nextHeader.Number)
+	if curHeight.Cmp(vr.useNewValidatorsFromHeight) >= 0 {
+		return vr.validators, vr.blsPubKeys
 	}
-	if header.Hash() != nextHeader.ParentHash {
-		return fmt.Errorf("Different hash between successive header: (%v): Prev %v New %v", header.Number, header.Hash(), nextHeader.ParentHash)
-	}
-	if vr.Next().Cmp(header.Number) != 0 {
-		return fmt.Errorf("Unexpected height: Got %v Expected %v", header.Number, vr.Next())
-	}
-	if header.ParentHash != vr.ParentHash() {
-		return fmt.Errorf("Unexpected Hash(%v): Got %v Expected %v", header.Number, header.ParentHash, vr.ParentHash())
-	}
-
-	if err := vr.verifyHeader(nextHeader); err != nil {
-		return errors.Wrapf(err, "verifyHeader %v", err)
-	}
-	if err := vr.verifyCascadingFields(nextHeader, header); err != nil {
-		return errors.Wrapf(err, "verifyCascadingFields %v", err)
-	}
-	// TODO: Fix as per incoming parms
-	parents := []*types.Header{header}
-	if err := vr.verifyVoteAttestation(nextHeader, parents); err != nil {
-		log.Println("Warn: Error verifying vote attestation") // TODO: How does logging work for verifier.., only receiver has logs?
-		if isPlatoBlock(header.Number) {                      // is plato block
-			return err
-		}
-	}
-	if err := vr.verifySeal(nextHeader, vr.ChainID()); err != nil {
-		return errors.Wrapf(err, "verifySeal %v", err)
-	}
-	if len(receipts) > 0 {
-		if err := vr.validateState(nextHeader, receipts); err != nil {
-			return errors.Wrapf(err, "validateState %v", err)
-		}
-	}
-	return nil
+	return vr.prevValidators, vr.prevBlsPubKeys
 }
 
-func (vr *Verifier) Update(header *types.Header) (err error) {
-	// TODO: Add Parent header
+// prove that header is linked to verified nextHeader
+// only then can header be used for receiver.Callback or vr.Update()
+func (vr *Verifier) Verify(lastHeader, currentHeader *ethTypes.Header, receipts ethTypes.Receipts) (error, bool) { // remove previous header
+
+	if currentHeader.Number.Cmp((&big.Int{}).Add(lastHeader.Number, big1)) != 0 {
+		return fmt.Errorf("Different height between successive header: Prev %v New %v", lastHeader.Number, currentHeader.Number), false
+	}
+	if lastHeader.Hash() != currentHeader.ParentHash {
+		return fmt.Errorf("Different hash between successive header: (%v): Prev %v New %v", lastHeader.Number, lastHeader.Hash(), currentHeader.ParentHash), false
+	}
+	if vr.Next().Cmp(lastHeader.Number) != 0 {
+		return fmt.Errorf("Unexpected height: Got %v Expected %v", lastHeader.Number, vr.Next()), false
+	}
+	if lastHeader.ParentHash != vr.ParentHash() {
+		return fmt.Errorf("Unexpected Hash(%v): Got %v Expected %v", lastHeader.Number, lastHeader.ParentHash, vr.ParentHash()), false
+	}
+
+	if err := vr.verifyHeader(currentHeader); err != nil {
+		return errors.Wrapf(err, "verifyHeader %v", err), false
+	}
+	if err := vr.verifyCascadingFields(currentHeader, lastHeader); err != nil {
+		return errors.Wrapf(err, "verifyCascadingFields %v", err), false
+	}
+	if err := vr.verifySeal(currentHeader, vr.ChainID()); err != nil {
+		return errors.Wrapf(err, "verifySeal %v", err), false
+	}
+	if len(receipts) > 0 {
+		if err := vr.validateState(currentHeader, receipts); err != nil {
+			return errors.Wrapf(err, "validateState %v", err), false
+		}
+	}
+	var isVerified bool
+	var err error
+	if isLubanBlock(lastHeader.Number) {
+		err, isVerified = vr.verifyVoteAttestation(currentHeader, lastHeader)
+		if err != nil {
+			vr.log.WithFields(log.Fields{"parentHeight": lastHeader.Number.String(), "currentHeight": currentHeader.Number.String()}).Warn("Verify vote attestation failed")
+			if isPlatoBlock(lastHeader.Number) {
+				return err, false
+			}
+		}
+
+		if !isVerified {
+			return nil, false
+		}
+
+	}
+
+	return nil, true
+}
+
+func (vr *Verifier) Update(justifiedHeader, currentHeader *ethTypes.Header) (err error) {
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
-	if header.Number.Uint64()%defaultEpochLength == 0 {
-		newValidators, valPubKeys, err := parseValidators(header)
+	if currentHeader.Number.Uint64()%defaultEpochLength == 0 {
+		newValidators, valPubKeys, err := parseValidators(currentHeader)
 		if err != nil {
 			return errors.Wrapf(err, "getValidatorMapFromHex %v", err)
 		}
 		// update validators only if epoch block and no error encountered
 		vr.prevValidators = vr.validators
 		vr.validators = newValidators
+		vr.prevBlsPubKeys = vr.blsPubKeys
 		vr.blsPubKeys = valPubKeys
-		vr.useNewValidatorsFromHeight = (&big.Int{}).Add(header.Number, big.NewInt(1+int64(len(vr.prevValidators)/2)))
+		vr.useNewValidatorsFromHeight = (&big.Int{}).Add(currentHeader.Number, big.NewInt(1+int64(len(vr.prevValidators)/2)))
 	}
-	vr.parentHash = header.Hash()
-	vr.next.Add(header.Number, big1)
+	vr.parentHash = currentHeader.ParentHash
+	vr.next = currentHeader.Number
+	vr.latestJustifiedHeader = justifiedHeader
 	return
-}
-
-func getValidatorMapFromHeightAndExtras(height uint64, headerExtra common.HexBytes) (map[ethCommon.Address]bool, error) {
-	if len(headerExtra) < extraVanity+extraSeal {
-		return nil, errMissingSignature
-	}
-
-	// valBytesLength to represent validatorBytesLength before or after luban
-	currValBytesLength := validatorBytesLengthBeforeLuban
-	if isLubanBlock(big.NewInt(int64(height))) {
-		currValBytesLength = validatorBytesLength
-	}
-
-	addrs := getValidatorBytesFromExtrasAndHeight(height, headerExtra)
-	numAddrs := len(addrs) / currValBytesLength
-	newVals := make(map[ethCommon.Address]bool, numAddrs)
-	for i := 0; i < numAddrs; i++ {
-		newVals[ethCommon.BytesToAddress(addrs[i*currValBytesLength:(i+1)*currValBytesLength])] = true
-	}
-	return newVals, nil
-}
-
-func getValidatorBytesFromExtrasAndHeight(height uint64, headerExtra common.HexBytes) []byte {
-	if len(headerExtra) <= extraVanity+extraSeal {
-		return nil
-	}
-
-	if !isLubanBlock(big.NewInt(int64(height))) {
-		if height%defaultEpochLength == 0 && (len(headerExtra)-extraSeal-extraVanity)%validatorBytesLengthBeforeLuban != 0 {
-			return nil
-		}
-		return headerExtra[extraVanity : len(headerExtra)-extraSeal]
-	}
-
-	if height%defaultEpochLength != 0 {
-		return nil
-	}
-	num := int(headerExtra[extraVanity])
-	if num == 0 || len(headerExtra) <= extraVanity+extraSeal+num*validatorBytesLength {
-		return nil
-	}
-	start := extraVanity + validatorNumberSize
-	end := start + num*validatorBytesLength
-	return headerExtra[start:end]
 }
 
 func isLubanBlock(height *big.Int) bool {
@@ -265,12 +245,11 @@ func parseValidators(header *ethTypes.Header) (map[ethCommon.Address]bool, []bsc
 
 	if !isLubanBlock(header.Number) {
 		n := len(validatorsBytes) / validatorBytesLengthBeforeLuban
-		// result := make([]ethCommon.Address, n)
-		result := make(map[ethCommon.Address]bool, n)
+		cnsAddrs := make(map[ethCommon.Address]bool, n)
 		for i := 0; i < n; i++ {
-			result[ethCommon.BytesToAddress(validatorsBytes[i*validatorBytesLengthBeforeLuban:(i+1)*validatorBytesLengthBeforeLuban])] = true
+			cnsAddrs[ethCommon.BytesToAddress(validatorsBytes[i*validatorBytesLengthBeforeLuban:(i+1)*validatorBytesLengthBeforeLuban])] = true
 		}
-		return result, nil, nil
+		return cnsAddrs, nil, nil
 	}
 
 	n := len(validatorsBytes) / validatorBytesLength
@@ -344,7 +323,7 @@ func getVoteAttestationFromHeader(header *ethTypes.Header) (*bscTypes.VoteAttest
 	return &attestation, nil
 }
 
-func (vr *Verifier) verifyHeader(header *types.Header) error {
+func (vr *Verifier) verifyHeader(header *ethTypes.Header) error {
 	if header.Number == nil {
 		return errUnknownBlock
 	}
@@ -371,13 +350,8 @@ func (vr *Verifier) verifyHeader(header *types.Header) error {
 		return errExtraValidators
 	}
 
-	// required ? not present on bsc repo
 	if isEpoch && len(signersBytes) == 0 {
 		return errMissingValidators
-	}
-
-	if isEpoch && len(signersBytes)%validatorBytesLength != 0 {
-		return errInvalidSpanValidators
 	}
 
 	// Ensure that the mix digest is zero as we don't have fork protection currently
@@ -395,7 +369,7 @@ func (vr *Verifier) verifyHeader(header *types.Header) error {
 	return nil
 }
 
-func (vr *Verifier) verifyCascadingFields(header *types.Header, parent *types.Header) error {
+func (vr *Verifier) verifyCascadingFields(header, parent *ethTypes.Header) error {
 	number := header.Number.Uint64()
 	if number == 0 {
 		return nil
@@ -426,54 +400,25 @@ func (vr *Verifier) verifyCascadingFields(header *types.Header, parent *types.He
 	return nil
 }
 
-func getJustifiedNumberAndHash(header *types.Header) (uint64, ethCommon.Hash, error) {
-	if header == nil {
-		return 0, ethCommon.Hash{}, fmt.Errorf("illegal chain or header")
-	}
-	parentAttestation, err := getVoteAttestationFromHeader(header)
-	if err != nil {
-		return 0, ethCommon.Hash{}, err
-	}
-
-	if parentAttestation == nil {
-		if isLubanBlock(header.Number) {
-			// TODO: how to handle logs?
-			log.Debug("once one attestation generated, attestation of snap would not be nil forever basically")
-		}
-		// 6d3c... is hash of block 0 of BSC
-		return 0, ethCommon.HexToHash("6d3c66c5357ec91d5c43af47e234a939b22557cbb552dc45bebbceeed90fbe34"), nil
-	}
-
-	return parentAttestation.Data.TargetNumber, parentAttestation.Data.TargetHash, nil
-}
-
-func (vr *Verifier) verifyVoteAttestation(header *ethTypes.Header, parents []*ethTypes.Header) error {
-
+func (vr *Verifier) verifyVoteAttestation(header *ethTypes.Header, parent *ethTypes.Header) (error, bool) {
 	attestation, err := getVoteAttestationFromHeader(header)
 	if err != nil {
-		return err
-	}
-	if attestation == nil {
-		return nil
-	}
-	if attestation.Data == nil {
-		return fmt.Errorf("invalid attestation, vote data is nil")
-	}
-	if len(attestation.Extra) > bscTypes.MaxAttestationExtraLength {
-		return fmt.Errorf("invalid attestation, too large extra length: %d", len(attestation.Extra))
+		return err, false
 	}
 
-	// Get parent block
-	// number := header.Number.Uint64()
-	var parent *types.Header
-	if len(parents) > 0 {
-		parent = parents[len(parents)-1]
-	} else {
-		// queryHeader()
-		// parent = chain.GetHeader(header.ParentHash, number-1)
-	}
 	if parent == nil || parent.Hash() != header.ParentHash {
-		return consensus.ErrUnknownAncestor
+		return consensus.ErrUnknownAncestor, false
+	}
+
+	if attestation == nil {
+		return nil, false
+	}
+
+	if attestation.Data == nil {
+		return fmt.Errorf("invalid attestation, vote data is nil"), false
+	}
+	if len(attestation.Extra) > bscTypes.MaxAttestationExtraLength {
+		return fmt.Errorf("invalid attestation, too large extra length: %d", len(attestation.Extra)), false
 	}
 
 	// The target block should be direct parent.
@@ -481,38 +426,27 @@ func (vr *Verifier) verifyVoteAttestation(header *ethTypes.Header, parents []*et
 	targetHash := attestation.Data.TargetHash
 	if targetNumber != parent.Number.Uint64() || targetHash != parent.Hash() {
 		return fmt.Errorf("invalid attestation, target mismatch, expected block: %d, hash: %s; real block: %d, hash: %s",
-			parent.Number.Uint64(), parent.Hash(), targetNumber, targetHash)
+			parent.Number.Uint64(), parent.Hash(), targetNumber, targetHash), false
 	}
 
 	// The source block should be the highest justified block.
 	sourceNumber := attestation.Data.SourceNumber
 	sourceHash := attestation.Data.SourceHash
-	justifiedBlockNumber, justifiedBlockHash, err := getJustifiedNumberAndHash(parent)
+	justifiedBlockNumber, justifiedBlockHash := vr.latestJustifiedHeader.Number.Uint64(), vr.latestJustifiedHeader.Hash()
 
-	if err != nil {
-		return fmt.Errorf("unexpected error when getting the highest justified number and hash")
-	}
 	if sourceNumber != justifiedBlockNumber || sourceHash != justifiedBlockHash {
 		return fmt.Errorf("invalid attestation, source mismatch, expected block: %d, hash: %s; real block: %d, hash: %s",
-			justifiedBlockNumber, justifiedBlockHash, sourceNumber, sourceHash)
+			justifiedBlockNumber, justifiedBlockHash, sourceNumber, sourceHash), false
 	}
 
-	// The snapshot should be the targetNumber-1 block's snapshot.
-	if len(parents) > 1 {
-		parents = parents[:len(parents)-1]
-	} else {
-		parents = nil
-	}
-
-	validators := vr.validators
-	blsPubKeys := vr.blsPubKeys
+	validators, blsPubKeys := vr.GetBlsPublicKeysForHeight(parent.Number)
 	if len(validators) != len(blsPubKeys) {
-		return fmt.Errorf("Length of validators and bls public keys not same")
+		return fmt.Errorf("Length of validators and bls public keys not same"), false
 	}
 
 	validatorsBitSet := bitset.From([]uint64{uint64(attestation.VoteAddressSet)})
 	if validatorsBitSet.Count() > uint(len(validators)) {
-		return fmt.Errorf("invalid attestation, vote number larger than validators number")
+		return fmt.Errorf("invalid attestation, vote number larger than validators number"), false
 	}
 
 	votedAddrs := make([]bls.PublicKey, 0, validatorsBitSet.Count())
@@ -523,29 +457,29 @@ func (vr *Verifier) verifyVoteAttestation(header *ethTypes.Header, parents []*et
 		}
 		voteAddr, err := bls.PublicKeyFromBytes(value[:])
 		if err != nil {
-			return fmt.Errorf("BLS public key converts failed: %v", err)
+			return fmt.Errorf("BLS public key converts failed: %v", err), false
 		}
 		votedAddrs = append(votedAddrs, voteAddr)
 	}
 
 	// The valid voted validators should be no less than 2/3 validators.
 	if len(votedAddrs) < ceilDiv(len(validators)*2, 3) {
-		return fmt.Errorf("invalid attestation, not enough validators voted")
+		return fmt.Errorf("invalid attestation, not enough validators voted"), false
 	}
 
 	// Verify the aggregated signature.
 	aggSig, err := bls.SignatureFromBytes(attestation.AggSignature[:])
 	if err != nil {
-		return fmt.Errorf("BLS signature converts failed: %v", err)
+		return fmt.Errorf("BLS signature converts failed: %v", err), false
 	}
 	if !aggSig.FastAggregateVerify(votedAddrs, attestation.Data.Hash()) {
-		return fmt.Errorf("invalid attestation, signature verify failed")
+		return fmt.Errorf("invalid attestation, signature verify failed"), false
 	}
 
-	return nil
+	return nil, true
 }
 
-func (vr *Verifier) verifySeal(header *types.Header, chainID *big.Int) error {
+func (vr *Verifier) verifySeal(header *ethTypes.Header, chainID *big.Int) error {
 	// Resolve the authorization key and check against validators
 	signer, err := ecrecover(header, chainID)
 	if err != nil {
@@ -563,7 +497,7 @@ func (vr *Verifier) verifySeal(header *types.Header, chainID *big.Int) error {
 }
 
 // ecrecover extracts the Ethereum account address from a signed header.
-func ecrecover(header *types.Header, chainId *big.Int) (ethCommon.Address, error) {
+func ecrecover(header *ethTypes.Header, chainId *big.Int) (ethCommon.Address, error) {
 	if len(header.Extra) < extraSeal {
 		return ethCommon.Address{}, errMissingSignature
 	}
@@ -581,14 +515,14 @@ func ecrecover(header *types.Header, chainId *big.Int) (ethCommon.Address, error
 }
 
 // SealHash returns the hash of a block prior to it being sealed.
-func SealHash(header *types.Header, chainId *big.Int) (hash ethCommon.Hash) {
+func SealHash(header *ethTypes.Header, chainId *big.Int) (hash ethCommon.Hash) {
 	hasher := sha3.NewLegacyKeccak256()
 	encodeSigHeader(hasher, header, chainId)
 	hasher.Sum(hash[:0])
 	return hash
 }
 
-func encodeSigHeader(w io.Writer, header *types.Header, chainId *big.Int) {
+func encodeSigHeader(w io.Writer, header *ethTypes.Header, chainId *big.Int) {
 	err := rlp.Encode(w, []interface{}{
 		chainId,
 		header.ParentHash,
@@ -612,12 +546,12 @@ func encodeSigHeader(w io.Writer, header *types.Header, chainId *big.Int) {
 	}
 }
 
-func (vr *Verifier) validateState(header *types.Header, receipts types.Receipts) error {
-	rbloom := types.CreateBloom(receipts)
+func (vr *Verifier) validateState(header *ethTypes.Header, receipts ethTypes.Receipts) error {
+	rbloom := ethTypes.CreateBloom(receipts)
 	if rbloom != header.Bloom {
 		return fmt.Errorf("invalid bloom (remote: %x  local: %x)", header.Bloom, rbloom)
 	}
-	receiptSha := types.DeriveSha(receipts, trie.NewStackTrie(nil))
+	receiptSha := ethTypes.DeriveSha(receipts, trie.NewStackTrie(nil))
 	if receiptSha != header.ReceiptHash {
 		return fmt.Errorf("invalid receipt root hash (remote: %x local: %x)", header.ReceiptHash, receiptSha)
 	}
