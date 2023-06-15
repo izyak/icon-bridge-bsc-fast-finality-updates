@@ -114,6 +114,12 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions, recei
 			},
 		),
 	}
+	if opts.LubanBlockHeight > 0 {
+		vr.lubanBlockHeight = big.NewInt(int64(opts.LubanBlockHeight))
+	}
+	if opts.PlatoBlockHeight > 0 {
+		vr.platoBlockHeight = big.NewInt(int64(opts.PlatoBlockHeight))
+	}
 
 	// cross check input parent hash
 	header, err := r.client().GetHeaderByHeight(ctx, big.NewInt(int64(opts.BlockHeight)))
@@ -123,12 +129,12 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions, recei
 	}
 	vr.parentHash = header.ParentHash
 
-	if isLubanBlock(header.Number) {
+	if vr.isLubanBlock(header.Number) {
 		finalizedHeader, err := r.client().GetHeaderByHeight(ctx, big.NewInt(int64(opts.FinalizedBlockHeight)))
 		if err != nil {
 			return nil, err
 		}
-		headerVoteAttestation, err := getVoteAttestationFromHeader(header)
+		headerVoteAttestation, err := vr.GetVoteAttestationFromHeader(header)
 
 		if headerVoteAttestation.Data.SourceNumber != finalizedHeader.Number.Uint64() || headerVoteAttestation.Data.SourceHash != finalizedHeader.Hash() {
 			return nil, errors.Wrapf(err, "block height %v does not have valid attestation for justified block: %v", header.Number, finalizedHeader.Number)
@@ -161,7 +167,7 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions, recei
 		return nil, fmt.Errorf("Unexpected ValidatorData(%v): Got %v Expected %v", roundedHeight, hex.EncodeToString(roundedHeader.Extra), opts.ValidatorData)
 	}
 
-	vr.validators, vr.blsPubKeys, err = parseValidators(roundedHeader)
+	vr.validators, vr.blsPubKeys, err = vr.parseValidators(roundedHeader)
 	if err != nil {
 		return nil, errors.Wrapf(err, "getValidatorMapFromHex %v", err)
 	}
@@ -302,7 +308,7 @@ func (r *receiver) syncVerifier(ctx context.Context, vr IVerifier, height int64)
 						"lbnHash":    lastBlock.Hash,
 						"nextHeight": next,
 						"bnHash":     next.Header.Hash()}).Error("verification failed. refetching block ", err)
-					cursor = int64(lastBlock.Number.Uint64()) - 1
+					cursor--
 					lastBlock = nil
 					break
 				}
@@ -447,13 +453,15 @@ func (r *receiver) receiveLoop(ctx context.Context, opts *BnOptions, callback fu
 								if justifiedBlockHeight-r.opts.Verifier.BlockHeight >= 1000 {
 									roundedHeight := big.NewInt(int64(justifiedBlockHeight - justifiedBlockHeight%defaultEpochLength))
 									roundedHeader, err := r.client().GetHeaderByHeight(ctx, roundedHeight)
-									attestationOfJustifiedBlock, e := getVoteAttestationFromHeader(justifiedBlock.Header)
+									attestationOfJustifiedBlock, e := vr.GetVoteAttestationFromHeader(justifiedBlock.Header)
 									if err == nil && e == nil && attestationOfJustifiedBlock != nil {
 										newOpts := &VerifierOptions{
 											BlockHeight:          justifiedBlockHeight,
 											FinalizedBlockHeight: attestationOfJustifiedBlock.Data.SourceNumber,
 											ValidatorData:        roundedHeader.Extra,
 											SnapshotDir:          r.opts.Verifier.SnapshotDir,
+											LubanBlockHeight:     r.opts.Verifier.LubanBlockHeight,
+											PlatoBlockHeight:     r.opts.Verifier.PlatoBlockHeight,
 										}
 										if err := snapshotVerifierOptions(newOpts); err == nil {
 											r.opts.Verifier = newOpts

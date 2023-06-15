@@ -40,10 +40,8 @@ const (
 )
 
 var (
-	big1       = big.NewInt(1)
-	uncleHash  = ethTypes.CalcUncleHash(nil)
-	LubanBlock = big.NewInt(29295050)
-	PlatoBlock = big.NewInt(29861024)
+	big1      = big.NewInt(1)
+	uncleHash = ethTypes.CalcUncleHash(nil)
 )
 
 var (
@@ -59,7 +57,9 @@ var (
 	// to contain a 65 byte secp256k1 signature.
 	errMissingSignature = errors.New("extra-data 65 byte signature suffix missing")
 
-	errMissingValidators = errors.New("epoch block does not have validators")
+	// errInvalidSpanValidators is returned if a block contains an
+	// invalid list of validators (i.e. non divisible by 20 bytes).
+	errInvalidSpanValidators = errors.New("invalid validator list on sprint end block")
 
 	// errExtraValidators is returned if non-sprint-end block contain validator data in
 	// their extra-data fields.
@@ -86,6 +86,8 @@ type VerifierOptions struct {
 	FinalizedBlockHeight uint64          `json:"finalizedBlockHeight"`
 	ValidatorData        common.HexBytes `json:"validatorData"`
 	SnapshotDir          string          `json:"snapshotDir"`
+	LubanBlockHeight     uint64          `json:"lubanBlockHeight"`
+	PlatoBlockHeight     uint64          `json:"platoBlockHeight"`
 }
 
 // next points to height whose parentHash is expected
@@ -102,6 +104,9 @@ type Verifier struct {
 	blsPubKeys                 []bscTypes.BLSPublicKey
 	prevBlsPubKeys             []bscTypes.BLSPublicKey
 	log                        log.Logger
+
+	lubanBlockHeight *big.Int
+	platoBlockHeight *big.Int
 }
 
 type IVerifier interface {
@@ -111,6 +116,7 @@ type IVerifier interface {
 	ParentHash() ethCommon.Hash
 	IsValidator(addr ethCommon.Address, curHeight *big.Int) bool
 	GetBlsPublicKeysForHeight(curHeight *big.Int) (map[ethCommon.Address]bool, []bscTypes.BLSPublicKey)
+	GetVoteAttestationFromHeader(header *ethTypes.Header) (*bscTypes.VoteAttestation, error)
 }
 
 func (vr *Verifier) Next() *big.Int {
@@ -187,11 +193,11 @@ func (vr *Verifier) Verify(lastHeader, currentHeader *ethTypes.Header, receipts 
 	}
 	var isVerified bool
 	var err error
-	if isLubanBlock(lastHeader.Number) {
+	if vr.isLubanBlock(lastHeader.Number) {
 		err, isVerified = vr.verifyVoteAttestation(currentHeader, lastHeader)
 		if err != nil {
 			vr.log.WithFields(log.Fields{"parentHeight": lastHeader.Number.String(), "currentHeight": currentHeader.Number.String()}).Warn("Verify vote attestation failed")
-			if isPlatoBlock(lastHeader.Number) {
+			if vr.isPlatoBlock(lastHeader.Number) {
 				return err, false
 			}
 		}
@@ -209,7 +215,7 @@ func (vr *Verifier) Update(justifiedHeader, currentHeader *ethTypes.Header) (err
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
 	if currentHeader.Number.Uint64()%defaultEpochLength == 0 {
-		newValidators, valPubKeys, err := parseValidators(currentHeader)
+		newValidators, valPubKeys, err := vr.parseValidators(currentHeader)
 		if err != nil {
 			return errors.Wrapf(err, "getValidatorMapFromHex %v", err)
 		}
@@ -226,21 +232,21 @@ func (vr *Verifier) Update(justifiedHeader, currentHeader *ethTypes.Header) (err
 	return
 }
 
-func isLubanBlock(height *big.Int) bool {
-	return height.Cmp(LubanBlock) > 0
+func (vr *Verifier) isLubanBlock(height *big.Int) bool {
+	return vr.lubanBlockHeight != nil && height.Cmp(vr.lubanBlockHeight) > 0
 }
 
-func isPlatoBlock(height *big.Int) bool {
-	return height.Cmp(PlatoBlock) > 0
+func (vr *Verifier) isPlatoBlock(height *big.Int) bool {
+	return vr.platoBlockHeight != nil && height.Cmp(vr.platoBlockHeight) > 0
 }
 
-func parseValidators(header *ethTypes.Header) (map[ethCommon.Address]bool, []bscTypes.BLSPublicKey, error) {
-	validatorsBytes := getValidatorBytesFromHeader(header)
+func (vr *Verifier) parseValidators(header *ethTypes.Header) (map[ethCommon.Address]bool, []bscTypes.BLSPublicKey, error) {
+	validatorsBytes := vr.getValidatorBytesFromHeader(header)
 	if len(validatorsBytes) == 0 {
 		return nil, nil, errors.New("invalid validators bytes")
 	}
 
-	if !isLubanBlock(header.Number) {
+	if !vr.isLubanBlock(header.Number) {
 		n := len(validatorsBytes) / validatorBytesLengthBeforeLuban
 		cnsAddrs := make(map[ethCommon.Address]bool, n)
 		for i := 0; i < n; i++ {
@@ -266,12 +272,12 @@ func parseValidators(header *ethTypes.Header) (map[ethCommon.Address]bool, []bsc
 // On luban fork, we introduce vote attestation into the header's extra field, so extra format is different from before.
 // Before luban fork: |---Extra Vanity---|---Validators Bytes (or Empty)---|---Extra Seal---|
 // After luban fork:  |---Extra Vanity---|---Validators Number and Validators Bytes (or Empty)---|---Vote Attestation (or Empty)---|---Extra Seal---|
-func getValidatorBytesFromHeader(header *ethTypes.Header) []byte {
+func (vr *Verifier) getValidatorBytesFromHeader(header *ethTypes.Header) []byte {
 	if len(header.Extra) <= extraVanity+extraSeal {
 		return nil
 	}
 
-	if !isLubanBlock(header.Number) {
+	if !vr.isLubanBlock(header.Number) {
 		if header.Number.Uint64()%defaultEpochLength == 0 && (len(header.Extra)-extraSeal-extraVanity)%validatorBytesLengthBeforeLuban != 0 {
 			return nil
 		}
@@ -290,13 +296,13 @@ func getValidatorBytesFromHeader(header *ethTypes.Header) []byte {
 	return header.Extra[start:end]
 }
 
-// getVoteAttestationFromHeader returns the vote attestation extracted from the header's extra field if exists.
-func getVoteAttestationFromHeader(header *ethTypes.Header) (*bscTypes.VoteAttestation, error) {
+// GetVoteAttestationFromHeader returns the vote attestation extracted from the header's extra field if exists.
+func (vr *Verifier) GetVoteAttestationFromHeader(header *ethTypes.Header) (*bscTypes.VoteAttestation, error) {
 	if len(header.Extra) <= extraVanity+extraSeal {
 		return nil, nil
 	}
 
-	if !isLubanBlock(header.Number) {
+	if !vr.isLubanBlock(header.Number) {
 		return nil, nil
 	}
 
@@ -342,13 +348,13 @@ func (vr *Verifier) verifyHeader(header *ethTypes.Header) error {
 	isEpoch := number%defaultEpochLength == 0
 
 	// Ensure that the extra-data contains a signer list on checkpoint, but none otherwise
-	signersBytes := getValidatorBytesFromHeader(header)
+	signersBytes := vr.getValidatorBytesFromHeader(header)
 	if !isEpoch && len(signersBytes) != 0 {
 		return errExtraValidators
 	}
 
 	if isEpoch && len(signersBytes) == 0 {
-		return errMissingValidators
+		return errInvalidSpanValidators
 	}
 
 	// Ensure that the mix digest is zero as we don't have fork protection currently
@@ -398,7 +404,7 @@ func (vr *Verifier) verifyCascadingFields(header, parent *ethTypes.Header) error
 }
 
 func (vr *Verifier) verifyVoteAttestation(header *ethTypes.Header, parent *ethTypes.Header) (error, bool) {
-	attestation, err := getVoteAttestationFromHeader(header)
+	attestation, err := vr.GetVoteAttestationFromHeader(header)
 	if err != nil {
 		return err, false
 	}
