@@ -697,7 +697,7 @@ func snapshotVerifierOptions(opts *VerifierOptions) error {
 		return errors.New("no snapshot dir specified")
 	}
 	if _, err := os.Stat(opts.SnapshotDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(opts.SnapshotDir, 0777); err != nil {
+		if err := os.MkdirAll(opts.SnapshotDir, 0775); err != nil {
 			return err
 		}
 	}
