@@ -426,14 +426,16 @@ func (vr *Verifier) verifyVoteAttestation(header *ethTypes.Header, parent *ethTy
 			parent.Number.Uint64(), parent.Hash(), targetNumber, targetHash), false
 	}
 
-	// The source block should be the highest justified block.
-	sourceNumber := attestation.Data.SourceNumber
-	sourceHash := attestation.Data.SourceHash
-	justifiedBlockNumber, justifiedBlockHash := vr.latestJustifiedHeader.Number.Uint64(), vr.latestJustifiedHeader.Hash()
+	if vr.latestJustifiedHeader != nil {
+		// The source block should be the highest justified block.
+		sourceNumber := attestation.Data.SourceNumber
+		sourceHash := attestation.Data.SourceHash
+		justifiedBlockNumber, justifiedBlockHash := vr.latestJustifiedHeader.Number.Uint64(), vr.latestJustifiedHeader.Hash()
 
-	if sourceNumber != justifiedBlockNumber || sourceHash != justifiedBlockHash {
-		return fmt.Errorf("invalid attestation, source mismatch, expected block: %d, hash: %s; real block: %d, hash: %s",
-			justifiedBlockNumber, justifiedBlockHash, sourceNumber, sourceHash), false
+		if sourceNumber != justifiedBlockNumber || sourceHash != justifiedBlockHash {
+			return fmt.Errorf("invalid attestation, source mismatch, expected block: %d, hash: %s; real block: %d, hash: %s",
+				justifiedBlockNumber, justifiedBlockHash, sourceNumber, sourceHash), false
+		}
 	}
 
 	validators, blsPubKeys := vr.GetBlsPublicKeysForHeight(parent.Number)

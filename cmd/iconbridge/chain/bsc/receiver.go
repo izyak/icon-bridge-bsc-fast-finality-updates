@@ -460,10 +460,14 @@ func (r *receiver) receiveLoop(ctx context.Context, opts *BnOptions, callback fu
 										}
 									}
 								}
-
 							}
 
-							if err := vr.Update(justifiedBlock.Header, bn.Header); err != nil {
+							var justifiedBlockHeader *ethTypes.Header
+							if justifiedBlock != nil {
+								justifiedBlockHeader = justifiedBlock.Header
+							}
+
+							if err := vr.Update(justifiedBlockHeader, bn.Header); err != nil {
 								return errors.Wrapf(err, "receiveLoop: vr.Update: %v", err)
 							}
 						}
