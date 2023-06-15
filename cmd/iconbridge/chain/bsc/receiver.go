@@ -97,7 +97,7 @@ type BnOptions struct {
 
 func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions, receiverStartHeight uint64) (vri IVerifier, err error) {
 	verifierOptionsSnapshot := loadBscVerifierOptionsSnapshot(opts.SnapshotDir, receiverStartHeight)
-	if verifierOptionsSnapshot != nil && verifierOptionsSnapshot.JustifiedBlockHeight > opts.JustifiedBlockHeight {
+	if verifierOptionsSnapshot != nil && verifierOptionsSnapshot.FinalizedBlockHeight > opts.FinalizedBlockHeight {
 		opts = verifierOptionsSnapshot
 	}
 
@@ -124,16 +124,26 @@ func (r *receiver) newVerifier(ctx context.Context, opts *VerifierOptions, recei
 	vr.parentHash = header.ParentHash
 
 	if isLubanBlock(header.Number) {
-		justifiedHeader, err := r.client().GetHeaderByHeight(ctx, big.NewInt(int64(opts.JustifiedBlockHeight)))
+		finalizedHeader, err := r.client().GetHeaderByHeight(ctx, big.NewInt(int64(opts.FinalizedBlockHeight)))
 		if err != nil {
 			return nil, err
 		}
 		headerVoteAttestation, err := getVoteAttestationFromHeader(header)
 
-		if headerVoteAttestation.Data.SourceNumber != justifiedHeader.Number.Uint64() || headerVoteAttestation.Data.SourceHash != justifiedHeader.Hash() {
-			return nil, errors.Wrapf(err, "Block height %v does not have valid attestation for justified block: %v", header.Number, justifiedHeader.Number)
+		if headerVoteAttestation.Data.SourceNumber != finalizedHeader.Number.Uint64() || headerVoteAttestation.Data.SourceHash != finalizedHeader.Hash() {
+			return nil, errors.Wrapf(err, "block height %v does not have valid attestation for justified block: %v", header.Number, finalizedHeader.Number)
 		}
-		vr.latestJustifiedHeader = justifiedHeader
+		// justified block = current block - 1
+		latestJustifiedBlock := int64(header.Number.Uint64() - 1)
+		latestJustifiedHeader, err := r.client().GetHeaderByHeight(ctx, big.NewInt(latestJustifiedBlock))
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to fetch header for justified block %d", latestJustifiedBlock)
+		}
+		if latestJustifiedHeader.Hash() != headerVoteAttestation.Data.TargetHash || latestJustifiedHeader.Number.Uint64() != headerVoteAttestation.Data.TargetNumber {
+			return nil, fmt.Errorf("Failed to verify parent for height %d", header.Number.Uint64())
+		}
+
+		vr.latestJustifiedHeader = latestJustifiedHeader
 	}
 
 	roundedHeight := big.NewInt(int64(opts.BlockHeight - opts.BlockHeight%defaultEpochLength))
@@ -173,6 +183,7 @@ func loadBscVerifierOptionsSnapshot(snapshotDir string, receiverStartHeight uint
 		f, _ := strconv.Atoi(file.Name())
 		if f < int(receiverStartHeight) {
 			snapshotFile = path.Join(snapshotDir, file.Name())
+			break
 		}
 	}
 	if snapshotFile == "" {
@@ -335,7 +346,7 @@ func (r *receiver) receiveLoop(ctx context.Context, opts *BnOptions, callback fu
 
 	var vr IVerifier
 	if r.opts.Verifier != nil {
-		vr, err = r.newVerifier(ctx, r.opts.Verifier)
+		vr, err = r.newVerifier(ctx, r.opts.Verifier, opts.StartHeight)
 		if err != nil {
 			return err
 		}
@@ -436,10 +447,11 @@ func (r *receiver) receiveLoop(ctx context.Context, opts *BnOptions, callback fu
 								if justifiedBlockHeight-r.opts.Verifier.BlockHeight >= 1000 {
 									roundedHeight := big.NewInt(int64(justifiedBlockHeight - justifiedBlockHeight%defaultEpochLength))
 									roundedHeader, err := r.client().GetHeaderByHeight(ctx, roundedHeight)
-									if err == nil {
+									attestationOfJustifiedBlock, e := getVoteAttestationFromHeader(justifiedBlock.Header)
+									if err == nil && e == nil && attestationOfJustifiedBlock != nil {
 										newOpts := &VerifierOptions{
-											BlockHeight:          bn.Header.Number.Uint64(),
-											JustifiedBlockHeight: justifiedBlockHeight,
+											BlockHeight:          justifiedBlockHeight,
+											FinalizedBlockHeight: attestationOfJustifiedBlock.Data.SourceNumber,
 											ValidatorData:        roundedHeader.Extra,
 											SnapshotDir:          r.opts.Verifier.SnapshotDir,
 										}
@@ -684,8 +696,8 @@ func snapshotVerifierOptions(opts *VerifierOptions) error {
 	if opts.SnapshotDir == "" {
 		return errors.New("no snapshot dir specified")
 	}
-	if _, err := os.Stat(opts.SnapshotDir); err == os.ErrNotExist {
-		if err := os.MkdirAll(opts.SnapshotDir, 0775); err != nil {
+	if _, err := os.Stat(opts.SnapshotDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(opts.SnapshotDir, 0777); err != nil {
 			return err
 		}
 	}
@@ -693,7 +705,7 @@ func snapshotVerifierOptions(opts *VerifierOptions) error {
 	if err != nil {
 		return err
 	}
-	filename := path.Join(opts.SnapshotDir, fmt.Sprintf("%v.json", opts.BlockHeight))
+	filename := path.Join(opts.SnapshotDir, fmt.Sprintf("%v", opts.BlockHeight))
 	if err := ioutil.WriteFile(filename, data, 0644); err != nil {
 		return err
 	}
@@ -708,7 +720,8 @@ func snapshotVerifierOptions(opts *VerifierOptions) error {
 	})
 	if len(files) > maxSnapshots {
 		for _, file := range files[maxSnapshots:] {
-			os.Remove(file.Name())
+			filename := path.Join(opts.SnapshotDir, file.Name())
+			os.Remove(filename)
 		}
 	}
 	return nil

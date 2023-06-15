@@ -83,7 +83,7 @@ var (
 
 type VerifierOptions struct {
 	BlockHeight          uint64          `json:"blockHeight"`
-	JustifiedBlockHeight uint64          `json:"justifiedBlockHeight"`
+	FinalizedBlockHeight uint64          `json:"finalizedBlockHeight"`
 	ValidatorData        common.HexBytes `json:"validatorData"`
 	SnapshotDir          string          `json:"snapshotDir"`
 }
