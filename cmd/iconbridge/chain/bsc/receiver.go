@@ -453,18 +453,21 @@ func (r *receiver) receiveLoop(ctx context.Context, opts *BnOptions, callback fu
 								if justifiedBlockHeight-r.opts.Verifier.BlockHeight >= 1000 {
 									roundedHeight := big.NewInt(int64(justifiedBlockHeight - justifiedBlockHeight%defaultEpochLength))
 									roundedHeader, err := r.client().GetHeaderByHeight(ctx, roundedHeight)
-									attestationOfJustifiedBlock, e := vr.GetVoteAttestationFromHeader(justifiedBlock.Header)
-									if err == nil && e == nil && attestationOfJustifiedBlock != nil {
-										newOpts := &VerifierOptions{
-											BlockHeight:          justifiedBlockHeight,
-											FinalizedBlockHeight: attestationOfJustifiedBlock.Data.SourceNumber,
-											ValidatorData:        roundedHeader.Extra,
-											SnapshotDir:          r.opts.Verifier.SnapshotDir,
-											LubanBlockHeight:     r.opts.Verifier.LubanBlockHeight,
-											PlatoBlockHeight:     r.opts.Verifier.PlatoBlockHeight,
-										}
-										if err := snapshotVerifierOptions(newOpts); err == nil {
-											r.opts.Verifier = newOpts
+									if err == nil {
+										attestationOfJustifiedBlock, err := vr.GetVoteAttestationFromHeader(justifiedBlock.Header)
+										if err == nil && attestationOfJustifiedBlock != nil {
+											newOpts := &VerifierOptions{
+												BlockHeight:          justifiedBlockHeight,
+												FinalizedBlockHeight: attestationOfJustifiedBlock.Data.SourceNumber,
+												ValidatorData:        roundedHeader.Extra,
+												SnapshotDir:          r.opts.Verifier.SnapshotDir,
+												LubanBlockHeight:     r.opts.Verifier.LubanBlockHeight,
+												PlatoBlockHeight:     r.opts.Verifier.PlatoBlockHeight,
+											}
+											r.log.WithFields(log.Fields{"options": newOpts}).Debug("snapshotVerifierOptions")
+											if err := snapshotVerifierOptions(newOpts); err == nil {
+												r.opts.Verifier = newOpts
+											}
 										}
 									}
 								}
