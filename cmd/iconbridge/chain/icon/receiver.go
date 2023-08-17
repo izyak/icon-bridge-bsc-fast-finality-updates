@@ -21,7 +21,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/icon-project/icon-bridge/cmd/iconbridge/chain/icon/types"
@@ -153,7 +156,11 @@ func NewReceiver(src, dst chain.BTPAddress,
 	return recvr, nil
 }
 
-func (r *Receiver) newVerifier(opts *types.VerifierOptions) (*Verifier, error) {
+func (r *Receiver) newVerifier(opts *types.VerifierOptions, receiverStartHeight uint64) (*Verifier, error) {
+	verifierOptionsSnapshot := loadIconVerifierOptionsSnapshot(opts.SnapshotDir, receiverStartHeight)
+	if verifierOptionsSnapshot != nil {
+		opts = verifierOptionsSnapshot
+	}
 	validators, err := r.Client.GetValidatorsByHash(opts.ValidatorsHash)
 	if err != nil {
 		return nil, err
@@ -185,9 +192,6 @@ func (r *Receiver) newVerifier(opts *types.VerifierOptions) (*Verifier, error) {
 }
 
 func (r *Receiver) syncVerifier(verifier IVerifier, height int64) error {
-	if height == verifier.Next() {
-		return nil
-	}
 	if verifier.Next() > height {
 		return fmt.Errorf(
 			"invalid target height: verifier height (%d) > target height (%d)",
@@ -304,14 +308,13 @@ func handleVerifierBlockRequests(requestCh chan *verifierBlockRequest, client IC
 }
 
 func (r *Receiver) receiveLoop(ctx context.Context, startHeight, startSeq uint64, callback func(rs []*chain.Receipt) error) (err error) {
-
 	blockReq, logFilter := r.blockReq, r.logFilter // copy
 
 	blockReq.Height, logFilter.seq = types.NewHexInt(int64(startHeight)), startSeq
 
 	var vr IVerifier
 	if r.opts.Verifier != nil {
-		vr, err = r.newVerifier(r.opts.Verifier)
+		vr, err = r.newVerifier(r.opts.Verifier, startHeight)
 		if err != nil {
 			return err
 		}
@@ -387,7 +390,7 @@ loop:
 
 		case blockResponse := <-btpBlockRespCh:
 
-			err = handleBTPBlockResponse(blockResponse, vr, &next, reconnect, callback, btpBlockRespCh, r.log)
+			err = r.handleBTPBlockResponse(blockResponse, vr, &next, reconnect, callback, btpBlockRespCh, r.log)
 			if err != nil {
 				return err
 			}
@@ -629,7 +632,7 @@ func handleBTPBlockRequest(
 	}
 }
 
-func handleBTPBlockResponse(blockResponse *btpBlockResponse, vr IVerifier, next *int64,
+func (r *Receiver) handleBTPBlockResponse(blockResponse *btpBlockResponse, vr IVerifier, next *int64,
 	reconnect func(), callback func(rs []*chain.Receipt) error,
 	blockResponseCh chan *btpBlockResponse, logger log.Logger) error {
 
@@ -656,6 +659,20 @@ func handleBTPBlockResponse(blockResponse *btpBlockResponse, vr IVerifier, next 
 		if err := callback(blockResponse.Receipts); err != nil {
 			return errors.Wrapf(err, "receiveLoop: callback: %v", err)
 		}
+
+		ht := uint64(blockResponse.Height)
+		if (ht-r.opts.Verifier.BlockHeight)%1000 == 0 {
+			newOpts := &types.VerifierOptions{
+				BlockHeight:    ht,
+				ValidatorsHash: blockResponse.Header.NextValidatorsHash,
+				SnapshotDir:    r.opts.Verifier.SnapshotDir,
+			}
+			r.log.WithFields(log.Fields{"options": newOpts}).Debug("snapshotVerifierOptions")
+			if err := snapshotVerifierOptions(newOpts); err == nil {
+				r.opts.Verifier = newOpts
+			}
+		}
+
 		if blockResponse = nil; len(blockResponseCh) > 0 {
 			blockResponse = <-blockResponseCh
 		}
@@ -710,4 +727,73 @@ func (r *Receiver) Subscribe(
 		}
 	}()
 	return _errCh, nil
+}
+
+func loadIconVerifierOptionsSnapshot(snapshotDir string, receiverStartHeight uint64) *types.VerifierOptions {
+	files, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		return nil
+	}
+	sort.Slice(files, func(i, j int) bool {
+		fi, _ := strconv.Atoi(files[i].Name())
+		fj, _ := strconv.Atoi(files[j].Name())
+		return fi > fj
+	})
+	snapshotFile := ""
+	for _, file := range files {
+		f, _ := strconv.Atoi(file.Name())
+		if f < int(receiverStartHeight) {
+			snapshotFile = path.Join(snapshotDir, file.Name())
+			break
+		}
+	}
+	if snapshotFile == "" {
+		return nil
+	}
+	f, err := os.Open(snapshotFile)
+	if err != nil {
+		return nil
+	}
+	cfg := &types.VerifierOptions{}
+	err = json.NewDecoder(f).Decode(cfg)
+	if err != nil {
+		return nil
+	}
+	return cfg
+}
+
+func snapshotVerifierOptions(opts *types.VerifierOptions) error {
+	maxSnapshots := 100
+	if opts.SnapshotDir == "" {
+		return errors.New("no snapshot dir specified")
+	}
+	if _, err := os.Stat(opts.SnapshotDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(opts.SnapshotDir, 0775); err != nil {
+			return err
+		}
+	}
+	data, err := json.MarshalIndent(opts, "", "  ")
+	if err != nil {
+		return err
+	}
+	filename := path.Join(opts.SnapshotDir, fmt.Sprintf("%v", opts.BlockHeight))
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		return err
+	}
+	files, err := os.ReadDir(opts.SnapshotDir)
+	if err != nil {
+		return err
+	}
+	sort.Slice(files, func(i, j int) bool {
+		fi, _ := strconv.Atoi(files[i].Name())
+		fj, _ := strconv.Atoi(files[j].Name())
+		return fi > fj
+	})
+	if len(files) > maxSnapshots {
+		for _, file := range files[maxSnapshots:] {
+			filename := path.Join(opts.SnapshotDir, file.Name())
+			os.Remove(filename)
+		}
+	}
+	return nil
 }
