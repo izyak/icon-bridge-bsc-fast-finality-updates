@@ -18,19 +18,19 @@ require (
 	github.com/harmony-one/bls v0.0.6
 	github.com/harmony-one/harmony v1.10.2
 	github.com/hugobyte/keygen v0.1.0
-	github.com/icon-project/goloop v1.2.11
+	github.com/icon-project/goloop v1.3.9
 	github.com/jroimartin/gocui v0.4.0
 	github.com/labstack/echo/v4 v4.9.0
-	github.com/mitchellh/mapstructure v1.4.1
+	github.com/mitchellh/mapstructure v1.5.0
 	github.com/near/borsh-go v0.3.1
 	github.com/pkg/errors v0.9.1
 	github.com/prysmaticlabs/prysm/v4 v4.0.2
 	github.com/reactivex/rxgo/v2 v2.5.0
 	github.com/shopspring/decimal v1.3.1
 	github.com/sirupsen/logrus v1.9.0
-	github.com/spf13/cobra v1.5.0
+	github.com/spf13/cobra v1.6.1
 	github.com/spf13/pflag v1.0.5
-	github.com/spf13/viper v1.8.1
+	github.com/spf13/viper v1.14.0
 	github.com/stretchr/testify v1.8.1
 	github.com/syndtr/goleveldb v1.0.1-0.20220721030215-126854af5e6d
 	github.com/tinylib/msgp v1.1.2 // indirect

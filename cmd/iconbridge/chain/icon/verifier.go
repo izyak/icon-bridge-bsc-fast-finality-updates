@@ -2,15 +2,14 @@ package icon
 
 import (
 	"fmt"
-	"github.com/icon-project/icon-bridge/cmd/iconbridge/chain/icon/types"
 	"sync"
+
+	"github.com/icon-project/icon-bridge/cmd/iconbridge/chain/icon/types"
 
 	"github.com/icon-project/goloop/common"
 	"github.com/icon-project/goloop/common/codec"
 	"github.com/icon-project/icon-bridge/common/crypto"
 )
-
-
 
 const (
 	VoteTypePrevote types.VoteType = iota
@@ -38,12 +37,12 @@ type TxResult struct {
 	CumulativeStepUsed []byte
 	StepUsed           []byte
 	StepPrice          []byte
-	LogsBloom     	[]byte
-	EventLogs     	[]types.EventLog
-	ScoreAddress  	[]byte
-	EventLogsHash 	common.HexBytes
-	TxIndex       	types.HexInt
-	BlockHeight   	types.HexInt
+	LogsBloom          []byte
+	EventLogs          []types.EventLog
+	ScoreAddress       []byte
+	EventLogsHash      common.HexBytes
+	TxIndex            types.HexInt
+	BlockHeight        types.HexInt
 }
 
 type Verifier struct {
@@ -72,11 +71,36 @@ func (vr *Verifier) Verify(blockHeader *types.BlockHeader, votes []byte) (ok boo
 
 	cvl := &types.CommitVoteList{}
 	_, err = codec.BC.UnmarshalFromBytes(votes, cvl)
+
+
+
+	var hash []byte 
+	if len(blockHeader.NSFilter) == 0 {
+		blockHeaderNoBTP := &types.BlockHeaderNoBTP{
+			Version:                blockHeader.Version,
+			Height:                 blockHeader.Height,
+			Timestamp:              blockHeader.Timestamp,
+			Proposer:               blockHeader.Proposer,
+			PrevID:                 blockHeader.PrevID,
+			VotesHash:              blockHeader.VotesHash,
+			NextValidatorsHash:     blockHeader.NextValidatorsHash,
+			PatchTransactionsHash:  blockHeader.PatchTransactionsHash,
+			NormalTransactionsHash: blockHeader.NormalTransactionsHash,
+			LogsBloom:              blockHeader.LogsBloom,
+			Result:                 blockHeader.Result,
+		}
+
+		hash = crypto.SHA3Sum256(codec.BC.MustMarshalToBytes(blockHeaderNoBTP))
+	} else {
+		hash = crypto.SHA3Sum256(codec.BC.MustMarshalToBytes(blockHeader))
+	}
+
+	
+
 	if err != nil {
 		return false, fmt.Errorf("invalid votes: %v; err=%v", common.HexBytes(votes), err)
 	}
 
-	hash := crypto.SHA3Sum256(codec.BC.MustMarshalToBytes(blockHeader))
 
 	vote := &types.Vote{
 		VoteBase: types.VoteBase{

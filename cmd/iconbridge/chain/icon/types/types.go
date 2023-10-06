@@ -20,11 +20,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/gorilla/websocket"
-	"github.com/icon-project/goloop/common"
 	"math/big"
 	"strconv"
 	"strings"
+
+	"github.com/gorilla/websocket"
+	"github.com/icon-project/goloop/common"
 
 	"github.com/icon-project/icon-bridge/common/intconv"
 	"github.com/icon-project/icon-bridge/common/jsonrpc"
@@ -68,8 +69,9 @@ const (
 	BMCRelayMethod     = "handleRelayMessage"
 	BMCGetStatusMethod = "getStatus"
 )
-
-type BlockHeader struct {
+// block header with btp information NSFilter was included after the BTP blocks 
+// inclusion NSFilter field is present only on btp blocks
+type BlockHeader struct { 
 	Version                int
 	Height                 int64
 	Timestamp              int64
@@ -80,7 +82,23 @@ type BlockHeader struct {
 	PatchTransactionsHash  []byte
 	NormalTransactionsHash []byte
 	LogsBloom              []byte
-	Result     []byte
+	Result                 []byte
+	NSFilter               []byte
+}
+
+// normal block headers without BTP message
+type BlockHeaderNoBTP struct {
+	Version                int
+	Height                 int64
+	Timestamp              int64
+	Proposer               []byte
+	PrevID                 []byte
+	VotesHash              []byte
+	NextValidatorsHash     []byte
+	PatchTransactionsHash  []byte
+	NormalTransactionsHash []byte
+	LogsBloom              []byte
+	Result                 []byte
 }
 
 type EventLog struct {
@@ -138,9 +156,9 @@ type BMCRelayMethodParams struct {
 }
 
 type CallParam struct {
-	FromAddress Address `json:"from" validate:"optional,t_addr_eoa"`
-	ToAddress   Address `json:"to" validate:"required,t_addr_score"`
-	DataType    string  `json:"dataType" validate:"required,call"`
+	FromAddress Address     `json:"from" validate:"optional,t_addr_eoa"`
+	ToAddress   Address     `json:"to" validate:"required,t_addr_score"`
+	DataType    string      `json:"dataType" validate:"required,call"`
 	Data        interface{} `json:"data"`
 }
 type AddressParam struct {
@@ -193,8 +211,8 @@ type BlockRequest struct {
 }
 
 type EventFilter struct {
-	Addr      Address `json:"addr,omitempty"`
-	Signature string  `json:"event"`
+	Addr      Address   `json:"addr,omitempty"`
+	Signature string    `json:"event"`
 	Indexed   []*string `json:"indexed,omitempty"`
 	Data      []*string `json:"data,omitempty"`
 }
@@ -229,7 +247,7 @@ type WSResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-//T_BIN_DATA, T_HASH
+// T_BIN_DATA, T_HASH
 type HexBytes string
 
 func (hs HexBytes) Value() ([]byte, error) {
@@ -242,7 +260,7 @@ func NewHexBytes(b []byte) HexBytes {
 	return HexBytes("0x" + hex.EncodeToString(b))
 }
 
-//T_INT
+// T_INT
 type HexInt string
 
 func (i HexInt) Value() (int64, error) {
@@ -275,7 +293,7 @@ func NewHexInt(v int64) HexInt {
 	return HexInt("0x" + strconv.FormatInt(v, 16))
 }
 
-//T_ADDR_EOA, T_ADDR_SCORE
+// T_ADDR_EOA, T_ADDR_SCORE
 type Address string
 
 func (a Address) Value() ([]byte, error) {
@@ -311,7 +329,7 @@ func NewAddress(b []byte) Address {
 	}
 }
 
-//T_SIG
+// T_SIG
 type Signature string
 
 type RelayMessage struct {
@@ -353,7 +371,6 @@ type Block struct {
 	//Signature              HexBytes  `json:"signature" validate:"optional,t_hash"`
 }
 
-
 type VerifierOptions struct {
 	BlockHeight    uint64         `json:"blockHeight"`
 	ValidatorsHash common.HexHash `json:"validatorsHash"`
@@ -365,19 +382,20 @@ type CommitVoteItem struct {
 }
 
 type CommitVoteList struct {
-	Round          int32
+	Round          int64
 	BlockPartSetID *PartSetID
 	Items          []CommitVoteItem
+	// Bytes          []byte
 }
 
 type PartSetID struct {
-	Count uint16
+	Count uint32
 	Hash  []byte
 }
 
 type HR struct {
 	Height int64
-	Round  int32
+	Round  int64
 }
 
 type VoteBase struct {
