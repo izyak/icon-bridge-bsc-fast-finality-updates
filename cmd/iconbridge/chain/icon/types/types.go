@@ -389,7 +389,7 @@ type CommitVoteList struct {
 }
 
 type PartSetID struct {
-	Count uint32
+	Count uint64
 	Hash  []byte
 }
 
